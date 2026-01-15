@@ -80,6 +80,11 @@ pub struct MemoryMeta {
     pub source: String, // "llm" / "memory" / "manual" など
     #[serde(default)]
     pub provider: Option<String>,
+
+    // ★追加: Commander が推定したタスク種別
+    #[serde(default)]
+    pub task_type: Option<String>,
+
     #[serde(default)]
     pub references: Vec<String>,
     #[serde(default)]
@@ -89,6 +94,7 @@ pub struct MemoryMeta {
     #[serde(default)]
     pub search_text: String, // input+output+添付テキストなどを詰めた検索面
 }
+
 
 #[derive(Debug, Clone)]
 pub struct MemoryHit {
@@ -380,7 +386,7 @@ pub fn build_memory_context(app: &AppHandle, query: &str, limit: usize) -> Resul
     Ok(format!("\n[Relevant Memories]\n{}", lines.join("\n")))
 }
 
-// ask_axis から使う「1対話の保存」ヘルパ
+// ask_axis から使う「1対話の保存」ヘルパ（従来版）
 pub fn save_interaction(
     app: &AppHandle,
     session_id: &str,
@@ -390,6 +396,54 @@ pub fn save_interaction(
     provider: &str,
     references: Vec<String>,
 ) -> Result<(), String> {
+    inner_save_interaction(
+        app,
+        session_id,
+        input_text,
+        output_text,
+        source,
+        provider,
+        references,
+        None,
+    )
+}
+
+// ★ Commander の task_type も一緒に保存する版
+pub fn save_interaction_with_task(
+    app: &AppHandle,
+    session_id: &str,
+    input_text: &str,
+    output_text: &str,
+    source: &str,
+    provider: &str,
+    references: Vec<String>,
+    task_type: Option<String>,
+) -> Result<(), String> {
+    inner_save_interaction(
+        app,
+        session_id,
+        input_text,
+        output_text,
+        source,
+        provider,
+        references,
+        task_type,
+    )
+}
+
+// 実処理本体
+fn inner_save_interaction(
+    app: &AppHandle,
+    session_id: &str,
+    input_text: &str,
+    output_text: &str,
+    source: &str,
+    provider: &str,
+    references: Vec<String>,
+    task_type: Option<String>,
+) -> Result<(), String> {
+    use chrono::Utc;
+
     let now = Utc::now().timestamp_millis();
     let id = format!("{}-{}", session_id, now);
 
@@ -399,7 +453,7 @@ pub fn save_interaction(
         timestamp_ms: now,
         input: IoBlock {
             text: input_text.to_string(),
-            attachments: vec![], // TODO: 添付を Axis から渡すように拡張
+            attachments: vec![],
         },
         output: IoBlock {
             text: output_text.to_string(),
@@ -407,16 +461,17 @@ pub fn save_interaction(
         },
     };
 
-    let search_text = normalize_text(&format!("{}\n{}\n", input_text, output_text));
+    let search_text: String = normalize_text(&format!("{}\n{}\n", input_text, output_text));
 
-    let meta = MemoryMeta {
+    let meta: MemoryMeta = MemoryMeta {
         id,
         kind: MemoryKind::ShortTerm,
         importance: 0.5,
-        tags: vec![],   // TODO: 付箋/タグ UI から付与
-        stickies: None, // TODO: 大/中/小分類をここに入れる
+        tags: vec![],
+        stickies: None,
         source: source.to_string(),
         provider: Some(provider.to_string()),
+        task_type, // ★ここで保存
         references,
         sealed_reason: None,
         created_at_ms: now,
@@ -424,13 +479,16 @@ pub fn save_interaction(
         search_text,
     };
 
-    save_entry_and_meta(app, &entry, &meta)?;
+    // ★ ここで self:: を付けて「同じモジュール内の関数」を明示
+    let res = self::save_entry_and_meta(app, &entry, &meta);
 
-    // ★ 保存されたことをログ
-    println!(
-        "[memory] saved id={} session={} source={} provider={}",
-        meta.id, session_id, source, provider
-    );
+    if let Ok(()) = res {
+        // ★ 保存されたことをログ
+        println!(
+            "[memory] saved id={} session={} source={} provider={}",
+            meta.id, session_id, source, provider
+        );
+    }
 
-    Ok(())
-}
+    res
+}  

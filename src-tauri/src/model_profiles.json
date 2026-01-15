@@ -1,0 +1,42 @@
+{
+  "gpt-5-nano": {
+    "code": 0.80,
+    "reasoning": 0.82,
+    "math": 0.78,
+    "general_qa": 0.82,
+    "planning": 0.78,
+    "multimodal": 0.75,
+    "speed": 0.90,
+    "cost": 0.95
+  },
+  "gemini-2.5-flash": {
+    "code": 0.75,
+    "reasoning": 0.80,
+    "math": 0.78,
+    "general_qa": 0.80,
+    "planning": 0.88,
+    "multimodal": 0.90,
+    "speed": 0.96,
+    "cost": 0.88
+  },
+  "grok-4-1-fast-reasoning": {
+    "code": 0.95,
+    "reasoning": 0.98,
+    "math": 0.98,
+    "general_qa": 0.96,
+    "planning": 0.92,
+    "multimodal": 0.80,
+    "speed": 0.80,
+    "cost": 0.55
+  },
+  "meta/llama-3.1-70b-instruct": {
+    "code": 0.86,
+    "reasoning": 0.88,
+    "math": 0.85,
+    "general_qa": 0.88,
+    "planning": 0.85,
+    "multimodal": 0.72,
+    "speed": 0.78,
+    "cost": 0.65
+  }
+}

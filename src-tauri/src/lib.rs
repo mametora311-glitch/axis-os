@@ -3,12 +3,13 @@
 mod ai;
 mod db;
 mod memory;
+mod model_profiles;
 mod observer;
 mod shell;
 mod storage;
 mod system;
 mod vision;
-mod web;
+mod web; // ★これを追加
 
 use crate::db::AxisDatabase;
 use chrono::Local;
@@ -65,6 +66,9 @@ struct RoutingDecision {
 
     #[serde(default = "default_reason")]
     reason: String,
+
+    #[serde(default)]
+    task_type: String, // JSONに無ければ "": 空文字
 }
 
 fn default_strategy() -> String {
@@ -254,50 +258,6 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(6.0);
 
-    // まず「メモリからそのまま返せるか」を確認
-    if let Ok(Some(hit)) = memory::search_best_for_query(&app, &input) {
-        if hit.score >= memory_direct_threshold {
-            println!(
-                "[memory] DIRECT HIT id={} score={:.2} (threshold={:.2})",
-                hit.id, hit.score, memory_direct_threshold
-            );
-
-            // メモリからの直返し
-            let mut answer = hit.entry.output.text.clone();
-            answer = sanitize_ai_output(&answer);
-
-            // 履歴ログ（UI用）
-            let log = InteractionLog {
-                id: Uuid::new_v4().to_string(),
-                session_id: session_id.clone(),
-                timestamp: now_ts,
-                user_tokens: input_tokens.clone(),
-                ai_response: answer.clone(),
-                provider_used: format!("memory ({:.2})", hit.score),
-            };
-            storage::save_log(&app, &log)?;
-
-            // 従来の SQLite ログにも保存（互換維持）
-            if let Ok(db) = AxisDatabase::init(&db_path) {
-                let _ = db.save_interaction(&session_id, "user", &input);
-                let _ = db.save_interaction(&session_id, "assistant", &answer);
-            }
-
-            // 「この対話自体」も履歴メモリとして保存（参照元ID付き）
-            let _ = memory::save_interaction(
-                &app,
-                &session_id,
-                &input,
-                &answer,
-                "memory",
-                "memory",
-                vec![hit.id.clone()],
-            );
-
-            return Ok(answer);
-        }
-    }
-
     // 直返ししない場合は、LLM 用コンテキストとして上位メモリを構築
     let memory_context = memory::build_memory_context(&app, &input, 3).unwrap_or_default();
 
@@ -306,16 +266,49 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
     // ---------------------------------------------------------
     // Phase 1: Commander Dispatch (司令塔)
     // ---------------------------------------------------------
+
+    // ★ モデルプロファイル文字列を構築
+    let profiles_block = crate::model_profiles::build_profiles_prompt();
+
     let dispatch_prompt = format!(
-        "You are the Kernel of AxisOS (2026). Choose the best AI model for the user request.\n\
-        [Context]\n{}\n\
-        [Candidates]\n\
-        - 'gpt': Best for CODING & System Control. (Model: {})\n\
-        - 'gemini': Best for PLANNING & Creative. (Model: {})\n\
-        - 'grok': Best for WIT & Real-time info. (Model: {})\n\
-        - 'llama': Simple chat.\n\
-        Return JSON: {{ \"target\": \"...\", \"reason\": \"...\" }}",
-        history_text, gpt_model, gemini_model, grok_model
+        r#"You are the Kernel of AxisOS (2026).
+    You must choose the best AI model for the current user request.
+
+    [Model Profiles]
+    {profiles_block}
+
+    [Context]
+    {history}
+
+    [Model Aliases]
+    - "gpt"    = OpenAI / gpt-5-nano (strong at coding, reasoning).
+    - "gemini" = Google / gemini-2.5-flash (strong at planning, multimodal).
+    - "grok"   = xAI / grok-4-1-fast-reasoning (strong at reasoning, math, news).
+    - "llama"  = Local meta/llama-3.1-70b-instruct.
+
+    [Your Task]
+
+    1. Infer the task_type of the user request.
+       Examples:
+       - "code_edit", "code_explain", "planning", "casual_chat",
+         "news_query", "math_solve", "file_gen", etc.
+
+    2. Using [Model Profiles], pick the best model alias ("gpt", "gemini", "grok", or "llama")
+       for this task_type. 
+       - Prefer higher 'code' for coding tasks.
+       - Prefer higher 'planning' for roadmap / project design.
+       - Prefer higher 'news'/'reasoning' (here: reasoning + general_qa) for real-time info or analysis.
+       - Consider 'speed' and 'cost' if multiple models are similar.
+
+    3. Return STRICT JSON with the following shape:
+
+    {{
+       "target": "<gpt|gemini|grok|llama>",
+       "task_type": "<short_label>",
+       "reason": "<brief explanation in Japanese>"
+    }}"#,
+        profiles_block = profiles_block,
+        history = history_text
     );
 
     let dispatch_msg = vec![
@@ -359,6 +352,7 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
         target: "gpt".to_string(),
         strategy: "fallback".to_string(),
         reason: "JSON Parse Failed".to_string(),
+        task_type: "unknown".to_string(), // ★追加
     });
 
     println!("👉 Routing: {} ({})", decision.target, decision.reason);
@@ -649,7 +643,7 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
     }
 
     // Axis メモリ (json+meta) にも保存
-    let _ = memory::save_interaction(
+    let _ = memory::save_interaction_with_task(
         &app,
         &session_id,
         &input,
@@ -657,6 +651,11 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
         "llm",
         &decision.target,
         vec![],
+        if decision.task_type.is_empty() {
+            None
+        } else {
+            Some(decision.task_type.clone())
+        },
     );
 
     Ok(final_answer)
