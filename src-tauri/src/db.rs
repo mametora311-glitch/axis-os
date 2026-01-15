@@ -124,6 +124,7 @@ impl AxisDatabase {
     }
 
     // lib.rs が呼んでるやつ（赤線の根）
+    #[allow(dead_code)]
     pub fn search_similar_logs(&self, query: &str) -> Result<Vec<String>> {
         // FTS5のクエリ構文で事故りやすい文字を軽く潰す（最低限）
         let cleaned: String = query

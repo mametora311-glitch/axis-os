@@ -2,12 +2,13 @@
 
 mod ai;
 mod db;
+mod memory;
 mod observer;
 mod shell;
 mod storage;
 mod system;
 mod vision;
-mod web; // ★追加 1: この1行を足す
+mod web;
 
 use crate::db::AxisDatabase;
 use chrono::Local;
@@ -190,20 +191,6 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
         .unwrap_or(std::path::PathBuf::from("."));
     let db_path = app_dir.join("memory.db");
 
-    let memory_context = if let Ok(db) = AxisDatabase::init(&db_path) {
-        if let Ok(logs) = db.search_similar_logs(&input) {
-            if !logs.is_empty() {
-                format!("\n[Relevant Memories]\n- {}", logs.join("\n- "))
-            } else {
-                "".to_string()
-            }
-        } else {
-            "".to_string()
-        }
-    } else {
-        "".to_string()
-    };
-
     // 念のためここでもロードを試みる（二重呼び出しは無害）
     dotenv().ok();
 
@@ -247,6 +234,7 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
             )
         })
         .collect();
+
     let history_text = if session_history.is_empty() {
         "None".to_string()
     } else {
@@ -256,6 +244,62 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
             .collect::<Vec<_>>()
             .join("\n---\n")
     };
+
+    // ---------------------------------------------------------
+    // Axis メモリ (json+meta) 参照
+    // ---------------------------------------------------------
+    // スコア閾値（env: MEMORY_DIRECT_THRESHOLD があれば上書き）
+    let memory_direct_threshold: f32 = env::var("MEMORY_DIRECT_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(6.0);
+
+    // まず「メモリからそのまま返せるか」を確認
+    if let Ok(Some(hit)) = memory::search_best_for_query(&app, &input) {
+        if hit.score >= memory_direct_threshold {
+            println!(
+                "[memory] DIRECT HIT id={} score={:.2} (threshold={:.2})",
+                hit.id, hit.score, memory_direct_threshold
+            );
+
+            // メモリからの直返し
+            let mut answer = hit.entry.output.text.clone();
+            answer = sanitize_ai_output(&answer);
+
+            // 履歴ログ（UI用）
+            let log = InteractionLog {
+                id: Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                timestamp: now_ts,
+                user_tokens: input_tokens.clone(),
+                ai_response: answer.clone(),
+                provider_used: format!("memory ({:.2})", hit.score),
+            };
+            storage::save_log(&app, &log)?;
+
+            // 従来の SQLite ログにも保存（互換維持）
+            if let Ok(db) = AxisDatabase::init(&db_path) {
+                let _ = db.save_interaction(&session_id, "user", &input);
+                let _ = db.save_interaction(&session_id, "assistant", &answer);
+            }
+
+            // 「この対話自体」も履歴メモリとして保存（参照元ID付き）
+            let _ = memory::save_interaction(
+                &app,
+                &session_id,
+                &input,
+                &answer,
+                "memory",
+                "memory",
+                vec![hit.id.clone()],
+            );
+
+            return Ok(answer);
+        }
+    }
+
+    // 直返ししない場合は、LLM 用コンテキストとして上位メモリを構築
+    let memory_context = memory::build_memory_context(&app, &input, 3).unwrap_or_default();
 
     let mut system_context = String::new();
 
@@ -587,6 +631,7 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
         }
     }
 
+    // ---- ログとメモリ保存 ----
     let log = InteractionLog {
         id: Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
@@ -600,9 +645,19 @@ async fn ask_axis(app: AppHandle, input: String, session_id: String) -> Result<S
 
     if let Ok(db) = AxisDatabase::init(&db_path) {
         let _ = db.save_interaction(&session_id, "user", &input);
-        // 変数名が final_answer か response か確認してください。直上の Ok(ここ) にある変数と同じです。
         let _ = db.save_interaction(&session_id, "assistant", &final_answer);
     }
+
+    // Axis メモリ (json+meta) にも保存
+    let _ = memory::save_interaction(
+        &app,
+        &session_id,
+        &input,
+        &final_answer,
+        "llm",
+        &decision.target,
+        vec![],
+    );
 
     Ok(final_answer)
 }
